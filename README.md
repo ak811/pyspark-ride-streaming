@@ -1,12 +1,7 @@
-# Streaming Analytics with Spark — ITCS 6190/8190 (Fall 2025)
+# Ride Sharing Analytics Using Spark Streaming and Spark SQL
 
-**Course:** Cloud Computing for Data Analysis — ITCS 6190/8190 (Fall 2025)  
-**Instructor:** Marco Vieira  
-**Hands‑on L9:** Streaming Analytics with Spark
-
+## Overview
 This repository implements a real-time analytics pipeline for a ride‑sharing platform using **Apache Spark Structured Streaming**. It ingests simulated ride events from a socket, parses JSON into structured columns, performs **driver‑level aggregations**, and computes **time‑windowed analytics**. Outputs are written to CSV for inspection and grading.
-
-> GitHub reference from the assignment: https://github.com/ITCS6190-Fall2025/Handson-L8-Spark-SQL_Streaming
 
 ---
 
@@ -27,8 +22,6 @@ This repository implements a real-time analytics pipeline for a ride‑sharing p
 │   └── task_3_samples/          # Selected sample CSVs for Task 3 (3 files)
 └── README.md                    # (This file)
 ```
-
-> **Do not commit** streaming checkpoints or metadata (_checkpoints, _spark_metadata). See the `.gitignore` snippet below.
 
 ---
 
@@ -79,7 +72,7 @@ python task3.py
 
 ---
 
-## Assignment Requirements → Implementation Mapping
+## Requirements → Implementation Mapping
 
 | Requirement | Implementation |
 |---|---|
@@ -126,34 +119,11 @@ _Example excerpt (columns: `driver_id,total_fare,avg_distance`):_
 > _Note:_ Long floats are normal from Spark. If desired, round in code with `round(sum(...), 2)` and `round(avg(...), 2)`.
 
 ### Task 3 — 5‑Minute Windows (1‑minute slide; watermark 1m)
-_Example rows (ISO-8601 timestamps):_
 ```
 window_start,window_end,sum_fare_amount
 2025-10-14T17:22:00.000Z,2025-10-14T17:27:00.000Z,1626.91
 2025-10-14T17:23:00.000Z,2025-10-14T17:28:00.000Z,5892.83
 2025-10-14T17:29:00.000Z,2025-10-14T17:34:00.000Z,23518.80
-```
-
----
-
-## Submission Checklist (per assignment)
-
-- [x] **Scripts:** `.py` (or `.ipynb`) for Tasks 1–3 and the generator.  
-- [x] **Outputs:** CSV files under `outputs/` (include **three** sample files for each task).  
-- [x] **README:** This document (approach, how to run, and results).  
-- [x] **Repo pushed** to GitHub with correct structure and formatting.  
-- [x] **Skip checkpoints** in commits to avoid large/noisy diffs.
-
-### Recommended `.gitignore`
-```
-# Spark streaming state
-outputs/**/_checkpoints/
-outputs/**/_spark_metadata/
-
-# Mac/OS, Python
-.DS_Store
-__pycache__/
-*.pyc
 ```
 
 ---
@@ -164,15 +134,4 @@ __pycache__/
 - **“Sorting not supported” error:** Sort streaming results **inside `foreachBatch`** (the micro‑batch is static) or drop the sort.  
 - **Port forwarding in Codespaces:** Ensure port **9999** is forwarded; the generator prints a “New client connected” message when Task 1/2/3 attaches.  
 - **Spark UI port in use:** Spark will auto-increment the UI port (4040 → 4041 → 4042). This is informational only.
-
----
-
-## Notes from the Assignment
-
-- _Task 1:_ Ingest from `localhost:9999`, parse JSON, print to console.  
-- _Task 2:_ Aggregate by `driver_id`: `SUM(fare_amount)` and `AVG(distance_km)`.  
-- _Task 3:_ Convert to timestamp, use 5‑minute windows with 1‑minute slide and a 1‑minute watermark; write CSV.  
-- Select three output files with data for each task.  
-- Task 3 windows are sparse initially; run long enough to get results.  
-- Do not commit `_checkpoints` (lots of small files).
 
