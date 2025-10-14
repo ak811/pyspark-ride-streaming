@@ -1,0 +1,47 @@
+# === Spark Structured Streaming state (keep CSV outputs, ignore state/metadata) ===
+outputs/**/_checkpoints/
+outputs/**/_spark_metadata/
+
+# Ignore full output directories for tasks (keep *_samples/)
+outputs/task_1/**
+outputs/task_2/**
+outputs/task_3/**
+
+# If you generate any intermediate Spark state locally
+spark-warehouse/
+metastore_db/
+derby.log
+
+# === Logs ===
+*.log
+logs/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.dist-info/
+.env
+.venv/
+venv/
+ENV/
+pip-wheel-metadata/
+.mypy_cache/
+.pytest_cache/
+.cache/
+
+# === Notebooks ===
+.ipynb_checkpoints/
+
+# === Editors / OS ===
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Codespaces / misc ===
+.python-version
