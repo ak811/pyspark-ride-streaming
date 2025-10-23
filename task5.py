@@ -130,7 +130,7 @@ scored = (
 query = (
     scored.writeStream
     .format("console")
-    .outputMode("append")   # append works with window+watermark when windows close
+    .outputMode("update")   # append works with window+watermark when windows close
     .option("truncate", False)
     .start()
 )
