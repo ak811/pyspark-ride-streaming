@@ -9,9 +9,6 @@ This repository implements a real-time analytics pipeline for a ride‑sharing p
 ```
 .
 ├── data_generator.py            # Streams JSON events over a TCP socket (0.0.0.0:9999)
-├── logs                         # Log captures from long-running tasks
-│   ├── task4.out                # Console output from Task 4 runs (optional)
-│   └── task5.out                # Console output from Task 5 runs (optional)
 ├── models                       # Saved Spark MLlib models
 │   ├── fare_model               # LinearRegressionModel for Task 4 (distance ➜ fare)
 │   └── fare_trend_model_v2      # LinearRegressionModel for Task 5 (time-based trend)
