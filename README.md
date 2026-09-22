@@ -1,137 +1,201 @@
-# Ride Sharing Analytics Using Spark Structured Streaming & Spark SQL
+## PySpark Structured Streaming ride analytics: watermarked sliding windows, MLlib fare prediction
 
-This repository implements a real-time analytics pipeline for a ride‑sharing platform using **Apache Spark Structured Streaming**. It ingests simulated ride events from a socket, parses JSON into structured columns, performs **driver‑level aggregations**, and computes **time‑windowed analytics**. MLlib models are used for per‑ride fare prediction and time‑based fare trend estimation. Selected outputs and logs are saved for inspection and grading.
+A real-time analytics system for a simulated ride-sharing platform, built on Apache Spark Structured Streaming. A Python generator streams ride events as JSON over a TCP socket. Five PySpark applications consume the stream: they parse the events into a typed schema, maintain per-driver aggregates, compute event-time sliding-window metrics bounded by a watermark, and score each ride against Spark MLlib linear regression models trained offline.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    G["data_generator.py<br/>TCP socket :9999"] --> S["Structured Streaming<br/>socket source + from_json"]
+    S --> T1["Task 1<br/>Parsed events"]
+    S --> T2["Task 2<br/>Per-driver aggregates"]
+    S --> T3["Task 3<br/>Sliding windows<br/>5 min / 1 min slide"]
+    S --> T4["Task 4<br/>Per-ride fare prediction"]
+    S --> T5["Task 5<br/>Windowed fare trend"]
+    D["training-dataset.csv"] --> M1["MLlib LinearRegression<br/>fare_model"]
+    D --> M2["MLlib LinearRegression<br/>fare_trend_model_v2"]
+    M1 --> T4
+    M2 --> T5
+    T1 & T2 & T3 & T4 & T5 --> O["outputs/<br/>sample CSVs"]
+```
+
+Each task is an independent Spark application with its own connection to the generator's socket.
+
+| Component | Technology | Responsibility |
+|---|---|---|
+| Event source | Python TCP socket server | Emits one JSON ride event per line on port 9999 |
+| Ingestion | Structured Streaming socket source | Reads the event stream as unbounded micro-batches |
+| Parsing | `from_json` with an explicit schema | Converts raw JSON strings into typed columns |
+| Stateful aggregation | `groupBy`, `window`, `withWatermark` | Per-driver totals and event-time windowed metrics |
+| Machine learning | Spark MLlib (`VectorAssembler`, `LinearRegression`) | Offline training, streaming inference |
+| Sinks | Console, `foreachBatch` CSV writers | Live inspection and persisted samples |
+
+### Design highlights
+
+- **Event-time processing.** Windows are computed from each ride's own timestamp, not from when Spark received the event, so results stay correct when events arrive late or out of order.
+- **Watermarking for bounded state.** A 1-minute watermark sets how long Spark waits for late data. Once the watermark passes a window's end, the window is finalized and its state is dropped, which keeps memory bounded on an unbounded stream.
+- **Sliding and tumbling windows.** Task 3 uses overlapping 5-minute windows that advance every minute. Task 5 uses non-overlapping 5-minute tumbling windows that match its training data.
+- **Offline training, streaming inference.** Models are fit once on static data, saved to disk, and applied to live micro-batches with the same feature pipeline.
+- **Micro-batch sinks with `foreachBatch`.** Each micro-batch is handled as a static DataFrame, which allows operations streaming DataFrames don't support, such as sorting, and gives full control over how CSVs are written.
 
 ---
 
 ## Repository Structure
 
 ```
-.
-├── data_generator.py            # Streams JSON events over a TCP socket (0.0.0.0:9999)
-├── models                       # Saved Spark MLlib models
-│   ├── fare_model               # LinearRegressionModel for Task 4 (distance ➜ fare)
-│   └── fare_trend_model_v2      # LinearRegressionModel for Task 5 (time-based trend)
-├── outputs                      # Selected sample CSVs for grading/inspection
-│   ├── task_1_samples           # Parsed rows (sample CSVs from Task 1)
-│   ├── task_2_samples           # Driver-level aggregates (sample CSVs from Task 2)
-│   ├── task_3_samples           # 5-min windowed sums (sample CSVs from Task 3)
-│   ├── task_4_samples           # Per-ride predictions & deviations (sample rows from Task 4)
-│   └── task_5_samples           # Time-windowed averages & predicted trend (sample rows from Task 5)
-├── README.md                    # This file
-├── requirements.txt             # Python dependencies (install with: pip install -r requirements.txt)
-├── task1.py                     # Task 1: Ingestion + JSON parsing (prints to console + sample CSVs)
-├── task2.py                     # Task 2: Driver-level aggregations (SUM fare, AVG distance)
-├── task3.py                     # Task 3: 5-min windowed sums with 1-min slide + 1-min watermark
-├── task4.py                     # Task 4: MLlib regression — per-ride fare prediction + deviation
-├── task5.py                     # Task 5: MLlib regression — time-based avg fare trend (5-min windows)
-└── training-dataset.csv         # Static training data used to fit the MLlib models
+pyspark-ride-streaming/
+├── data_generator.py          # TCP socket server streaming JSON ride events on 0.0.0.0:9999
+├── task1.py                   # Ingestion and JSON parsing
+├── task2.py                   # Per-driver aggregations: SUM(fare), AVG(distance)
+├── task3.py                   # Sliding windows (5 min / 1 min slide) with a 1-minute watermark
+├── task4.py                   # MLlib per-ride fare prediction and deviation
+├── task5.py                   # MLlib time-based average fare trend on 5-minute windows
+├── training-dataset.csv       # Static training data for both MLlib models
+├── requirements.txt           # Python dependencies
+├── models/
+│   ├── fare_model/            # LinearRegressionModel: distance_km → fare_amount
+│   └── fare_trend_model_v2/   # LinearRegressionModel: time features → average fare
+└── outputs/
+    ├── task_1_samples/        # Parsed events
+    ├── task_2_samples/        # Per-driver aggregates
+    ├── task_3_samples/        # Sliding-window fare sums
+    ├── task_4_samples/        # Per-ride predictions and deviations
+    └── task_5_samples/        # Windowed actual vs. predicted average fares
 ```
 
+## Event Schema
+
+Each event is a single-line JSON object:
+
+```json
+{"trip_id": "...", "driver_id": 54, "distance_km": 25.25, "fare_amount": 100.11, "timestamp": "2025-10-14 17:18:05"}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `trip_id` | string (UUID) | Unique ride identifier |
+| `driver_id` | integer | Driver identifier |
+| `distance_km` | double | Trip distance in kilometers |
+| `fare_amount` | double | Fare charged |
+| `timestamp` | string (`yyyy-MM-dd HH:mm:ss`) | Event time; cast to `TimestampType` as `event_time` for windowing |
+
 ---
+
+## Prerequisites
+
+- Python 3
+- A Java runtime supported by your PySpark version (PySpark runs on the JVM)
+- Python dependencies from `requirements.txt`
 
 ## Quickstart
 
-### 1) Install dependencies
-Use the provided **requirements.txt**:
+### 1. Install dependencies
+
 ```bash
 pip install -r requirements.txt
+mkdir -p logs outputs
 ```
 
-### 2) Start the data generator (Terminal A)
+### 2. Start the event generator (terminal A)
+
 ```bash
 python data_generator.py
 ```
-This opens a TCP socket on `0.0.0.0:9999` and continually emits JSON events like:
-```json
-{"trip_id":"...","driver_id":54,"distance_km":25.25,"fare_amount":100.11,"timestamp":"2025-10-14 17:18:05"}
-```
 
-### 3) Run each task in its own terminal
+The generator listens on `0.0.0.0:9999`, prints `New client connected` whenever a Spark application attaches, and emits one event per line.
 
-#### Task 1 — Ingestion + Parsing
+### 3. Run a task (terminal B)
+
 ```bash
 python task1.py
 ```
-- Reads from the socket with `spark.readStream.format("socket")`.
-- Parses JSON into columns: `trip_id, driver_id, distance_km, fare_amount, timestamp`.
-- Prints to console and writes selected samples to `outputs/task_1_samples/`.
 
-#### Task 2 — Driver-Level Aggregations
-```bash
-python task2.py
-```
-- Groups by `driver_id` and computes:
-  - `SUM(fare_amount)` → `total_fare`
-  - `AVG(distance_km)` → `avg_distance`
-- Writes per-batch sample CSVs under `outputs/task_2_samples/`.
+Keep the generator running for as long as a task is active. To keep a log of a task's console output:
 
-#### Task 3 — 5-Minute Windowed Sums (1-Minute Slide + Watermark)
 ```bash
-python task3.py
-```
-- Converts `timestamp` → `event_time` (`TimestampType`), applies `withWatermark("event_time", "1 minute")`.
-- Uses `window("event_time", "5 minutes", "1 minute")` and aggregates `SUM(fare_amount)`.
-- Sorts results **inside** `foreachBatch` (static DF) and writes selected CSVs to `outputs/task_3_samples/`.
-- Let it run ~6–7 minutes to produce non-empty window results.
-
-#### Task 4 — Real-Time Fare Prediction (distance ➜ fare using MLlib)
-```bash
-python task4.py
-# (optional) capture logs
 python task4.py | tee logs/task4.out
 ```
-- Trains a **LinearRegression** model one-time on `training-dataset.csv` using `distance_km` → `fare_amount`, saved to `models/fare_model/`.
-- Streams live rides, assembles features, predicts `predicted_fare`, and computes **`deviation = |fare_amount - predicted_fare|`**.
-- Prints to console; selected rows may be saved to `outputs/task_4_samples/`.
-
-#### Task 5 — Time-Based Fare Trend Prediction (5-Minute Windows using MLlib)
-```bash
-python task5.py
-# (optional) capture logs
-python task5.py | tee logs/task5.out
-```
-- Trains a **LinearRegression** model on 5-minute **tumbling** windows of `training-dataset.csv` using time features (`hour_of_day`, `minute_of_hour`). Saved under `models/fare_trend_model_v2/`.
-- Streaming: aggregates into the same 5-minute windows with a `1 minute` watermark, computes `actual_avg_fare` and **`predicted_next_avg_fare`** for that window.
-- In **`update`** mode the same window may re-emit as late data arrives; **`append`** shows only finalized windows.
 
 ---
 
-## Requirements → Implementation Mapping
+## Tasks
+
+### Task 1: Ingestion and Parsing
+
+- Reads the stream with `spark.readStream.format("socket")` from `localhost:9999`.
+- Parses each line with `from_json(col("value"), schema)` into `trip_id`, `driver_id`, `distance_km`, `fare_amount`, and `timestamp`.
+- Prints parsed rows to the console in `append` mode and writes samples to `outputs/task_1_samples/`.
+
+### Task 2: Per-Driver Aggregations
+
+- Groups the stream by `driver_id` and computes:
+  - `SUM(fare_amount)` as `total_fare`
+  - `AVG(distance_km)` as `avg_distance`
+- Writes per-batch snapshots of the running aggregates to `outputs/task_2_samples/` through `foreachBatch`.
+
+### Task 3: Sliding-Window Fare Sums
+
+- Casts `timestamp` to `event_time` (`TimestampType`) and applies `withWatermark("event_time", "1 minute")`.
+- Aggregates `SUM(fare_amount)` over `window("event_time", "5 minutes", "1 minute")`, which produces overlapping 5-minute windows that start every minute.
+- Sorts each micro-batch inside `foreachBatch` and writes results to `outputs/task_3_samples/`.
+- The first finalized window appears after about 6 to 7 minutes: 5 minutes of window, plus the 1-minute watermark, plus micro-batch latency.
+
+### Task 4: Per-Ride Fare Prediction
+
+- **Training:** fits a `LinearRegression` model on `training-dataset.csv`, with `distance_km` as the only feature (assembled by `VectorAssembler`) and `fare_amount` as the label. The model is saved to `models/fare_model/`.
+- **Inference:** applies the same feature pipeline to each streaming ride and computes:
+  - `predicted_fare`: the model's estimate
+  - `deviation = |fare_amount - predicted_fare|`: how far the actual fare is from the expected one, a simple signal for spotting anomalous fares
+- Prints results to the console and writes samples to `outputs/task_4_samples/`.
+
+### Task 5: Time-Based Fare Trend
+
+- **Training:** aggregates `training-dataset.csv` into 5-minute tumbling windows and fits a `LinearRegression` model on the time features `hour_of_day` and `minute_of_hour` to predict each window's average fare. The model is saved to `models/fare_trend_model_v2/`.
+- **Inference:** aggregates the live stream into the same 5-minute windows with a 1-minute watermark, then outputs `actual_avg_fare` alongside the model's `predicted_next_avg_fare`.
+- **Output modes:** in `update` mode, a window is re-emitted whenever late data changes its aggregate. In `append` mode, each window is emitted once, after the watermark finalizes it.
+
+---
+
+## Requirements Mapping
 
 | Requirement | Implementation |
 |---|---|
-| Ingest from socket (localhost:9999) | `spark.readStream.format("socket").option("host","localhost").option("port",9999)` |
+| Ingest from socket | `spark.readStream.format("socket").option("host", "localhost").option("port", 9999)` |
 | Parse JSON into columns | `from_json(col("value"), schema).alias("json").select("json.*")` |
-| Print parsed data to console | `writeStream.format("console").outputMode("append")` (Task 1) |
-| Driver-level real-time aggregations | `groupBy("driver_id")` + `sum(fare_amount)`, `avg(distance_km)` (Task 2) |
-| Write aggregations to CSV | `foreachBatch` writing samples to `outputs/task_2_samples/` |
-| Time-windowed analytics | `withWatermark("event_time","1 minute")`, `window("5 minutes","1 minute")` (Task 3) |
-| Write windowed results to CSV | `foreachBatch` writing samples to `outputs/task_3_samples/` |
-| **Task 4: Train & predict fares** | `VectorAssembler(["distance_km"])` + `LinearRegression` → `models/fare_model` → streaming predictions + `deviation` |
-| **Task 5: Train time-based trend** | 5-min tumbling windows + time features (`hour_of_day`, `minute_of_hour`) → `models/fare_trend_model_v2` → `actual_avg_fare` vs. `predicted_next_avg_fare` |
+| Print parsed data | `writeStream.format("console").outputMode("append")` |
+| Per-driver real-time aggregation | `groupBy("driver_id")` with `sum("fare_amount")` and `avg("distance_km")` |
+| Persist aggregates | `foreachBatch` CSV writer to `outputs/task_2_samples/` |
+| Event-time windowed analytics | `withWatermark("event_time", "1 minute")` and `window("event_time", "5 minutes", "1 minute")` |
+| Persist windowed results | `foreachBatch` CSV writer to `outputs/task_3_samples/` |
+| Train and serve a fare model | `VectorAssembler(["distance_km"])` and `LinearRegression`, saved to `models/fare_model/` |
+| Train and serve a trend model | 5-minute tumbling windows, `hour_of_day` and `minute_of_hour` features, saved to `models/fare_trend_model_v2/` |
 
 ---
 
 ## Sample Outputs
 
-### Task 1 — Parsed Rows (examples)
+### Task 1: Parsed events
+
 ```
 d34e5277-8fd6-4067-8eec-5d63cd06535f,23,39.99,62.85,2025-10-14 17:20:57
 55a0a604-202b-4ca8-9520-b938833fa867,49,25.43,8.72,2025-10-14 17:20:58
 f669a3b1-834c-40cd-97ac-bcf82333ac8c,19,44.6,118.66,2025-10-14 17:20:56
 ```
 
-### Task 2 — Driver Aggregations (snapshots)
-_Columns: `driver_id,total_fare,avg_distance`_
+### Task 2: Per-driver aggregates
+
+Columns: `driver_id, total_fare, avg_distance`
+
 ```
 65,77.11,26.55
 78,164.29,23.65
 81,215.8,27.56
-...
 ```
 
-### Task 3 — 5-Minute Windows (1-minute slide; watermark 1m)
+### Task 3: Sliding-window fare sums
+
 ```
 window_start,window_end,sum_fare_amount
 2025-10-14T17:22:00.000Z,2025-10-14T17:27:00.000Z,1626.91
@@ -139,8 +203,10 @@ window_start,window_end,sum_fare_amount
 2025-10-14T17:29:00.000Z,2025-10-14T17:34:00.000Z,23518.80
 ```
 
-### Task 4 — Per-Ride Fare Prediction + Deviation
-_Columns: `trip_id,driver_id,distance_km,fare_amount,predicted_fare,deviation,timestamp`_
+### Task 4: Per-ride prediction and deviation
+
+Columns: `trip_id, driver_id, distance_km, fare_amount, predicted_fare, deviation, timestamp`
+
 ```
 16c873cb-5e73-4adf-896e-a02702552673,15,27.0,72.5,51.06825011249654,21.431749887503457,2025-10-22 22:04:02
 74d7b792-3460-48a9-936a-da6d64255127,91,14.59,49.05,28.746938929409502,20.303061070590495,2025-10-22 22:04:03
@@ -149,8 +215,10 @@ _Columns: `trip_id,driver_id,distance_km,fare_amount,predicted_fare,deviation,ti
 9f9340da-49a4-4ed3-b404-639815a035b8,19,36.27,111.98,67.74178392935528,44.238216070644725,2025-10-22 22:04:06
 ```
 
-### Task 5 — Time-Based Fare Trend (5-minute windows)
-_Columns: `window_start,window_end,actual_avg_fare,predicted_next_avg_fare`_
+### Task 5: Windowed fare trend
+
+Columns: `window_start, window_end, actual_avg_fare, predicted_next_avg_fare`
+
 ```
 2025-10-22 22:15:00,2025-10-22 22:20:00,79.0018181818182,48.88266302780869
 2025-10-22 22:20:00,2025-10-22 22:25:00,80.50434782608696,48.70300203146776
@@ -160,12 +228,31 @@ _Columns: `window_start,window_end,actual_avg_fare,predicted_next_avg_fare`_
 
 ---
 
+## Model Observations
+
+- **Fitted fare model.** The Task 4 samples imply a fitted line of roughly `fare ≈ 1.80 × distance_km + 2.50`.
+- **Training/serving skew.** Both models consistently underpredict the live stream. In Task 5, predicted window averages sit near 48 while actual averages range from about 77 to 83. The generator's fare distribution clearly differs from `training-dataset.csv`, so the large deviations in Task 4 largely reflect that mismatch, not anomalous rides.
+- **Linear time features.** Encoding `minute_of_hour` as a raw number makes predictions drift steadily within each hour (about 0.18 lower per 5-minute window in the samples) and jump back at the hour boundary. Cyclical encoding (sine and cosine of the hour and minute) would model periodic demand patterns better.
+
+---
+
 ## Troubleshooting
 
-- **Empty Task 3 samples**: Many micro-batches won’t contain a *completed* 5-min window yet. Let Task 3 run ~6–7 minutes. Inside `foreachBatch`, you can skip writing empty batches by checking `batch_df.rdd.isEmpty()`.
-- **Task 5 repeats the same window**: Expected in **`update`** mode as late data updates the aggregate. Switch to **`append`** to emit only after watermark finalization.
-- **“Sorting not supported”**: Sort streaming results **inside `foreachBatch`** (the micro-batch is static) or drop the sort on the streaming DF.
-- **Port forwarding (Codespaces)**: Ensure port **9999** is forwarded; the generator prints “New client connected” when a task attaches.
-- **Spark UI port in use**: Spark auto-increments the UI port (4040 → 4041 → 4042). Informational only.
-- **Rounding**: Spark’s floating-point prints can be long. If desired, wrap with `round(sum(...), 2)` and `round(avg(...), 2)`.
+| Symptom | Cause | Resolution |
+|---|---|---|
+| Task 3 writes empty CSVs | No window has been finalized yet | Let it run 6 to 7 minutes. Skip empty micro-batches with `if batch_df.isEmpty(): return` |
+| Task 5 emits the same window repeatedly | `update` mode re-emits windows as late data arrives | Use `append` mode to emit each window once, after finalization |
+| `Sorting is not supported on streaming DataFrames` | `orderBy` applied to a streaming DataFrame | Sort inside `foreachBatch`, where each micro-batch is static |
+| `tee: logs/task4.out: No such file or directory` | The `logs/` directory doesn't exist | Run `mkdir -p logs` first |
+| Task can't connect | Generator not running, or port not forwarded | Start `data_generator.py` first. In Codespaces, forward port 9999 |
+| Spark UI reports port 4040 in use | Several Spark applications running | Informational only. Spark moves to 4041, 4042, and so on |
+| Long floating-point values | Unrounded aggregates | Wrap with `round(..., 2)` |
 
+---
+
+## Limitations and Production Considerations
+
+- **Socket source.** Spark's socket source is meant for testing and doesn't support replay, so data is lost if a job restarts. A production deployment would read from a durable, replayable source such as Apache Kafka or Amazon Kinesis.
+- **Checkpointing.** Set `checkpointLocation` on each streaming query so that state and progress survive restarts. Combined with a replayable source, this enables exactly-once processing.
+- **Unbounded state in Task 2.** The per-driver aggregation has no watermark or time bound, so its state grows with the number of drivers for as long as the query runs. Windowing it, or using `flatMapGroupsWithState` with timeouts, would bound it.
+- **Model lifecycle.** Models are trained once on static data. Retraining on recent stream data and monitoring the gap between predicted and actual fares would reduce the training/serving skew noted above.
